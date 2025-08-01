@@ -93,13 +93,16 @@ def main(args: Union[str, List[str]] = None) -> int:
             prev_spectra_meta_df, prev_spectra_hvs = hd_preprocess.load_checkpoint(
                 config=config, logger=logger)
 
-            ##load clustering results file as well 
+            #load clustering results file
             cluster_results = hd_preprocess.load_clustering_result(config=config, logger=logger)
+
+            #load previous results into StaticClusterResults class 
             prevResults = hd_preprocess.StaticClusterResults(prev_spectra_meta_df, prev_spectra_hvs, cluster_results)
             
             print(prev_spectra_meta_df.head())
             print(cluster_results.head())
 
+            #retrieve hypervectors, metadata of cluster 20
             print("printing results of cluster 20")
             meta_subset, hvs_subset, cluster_subset = prevResults.get_cluster_data(20)
             print(meta_subset.head())
@@ -107,19 +110,15 @@ def main(args: Union[str, List[str]] = None) -> int:
             print(cluster_subset.head())
              
             print(len(prev_spectra_meta_df), len(prev_spectra_hvs), len(cluster_results))
+
+            #retrieve hypervectors, metadata of bucket 598
             print("printing results of bucket 598")
             meta_subset, hvs_subset, cluster_subset = prevResults.get_bucket_data(598)
             print(meta_subset.head())
             print(hvs_subset[:10])
             print(cluster_subset.head())
 
-
-            #make data structure out of checkpoint and parquet allows retrive bucket/cluster 
-            #convert back to parquet 
-            #hdf5 
-            # make a class for retrieving data, input in hvs, metadata, cluste 
-        
-            ###################### 1. Load and parse spectra files
+            ###################### 1. Load and parse additional spectra files
             spectra_meta_df, spectra_mz, spectra_intensity = hd_preprocess.load_process_spectra_parallel(config=config, logger=logger)
             logger.info("Preserve {} spectra for cluster charges: {}".format(len(spectra_meta_df), config.cluster_charges))
             
@@ -141,28 +140,28 @@ def main(args: Union[str, List[str]] = None) -> int:
                     config=config, logger=logger) # maybe save spectra_mz too 
         
   
-    ###################### 3. Cluster for each charge
- #   cluster_df = pd.DataFrame()
- #   for prec_charge_i in tqdm.tqdm(config.cluster_charges):
- #       # Select spectra with cluster charge
- #       idx = spectra_meta_df['precursor_charge']==prec_charge_i
- #       spec_df_by_charge = spectra_meta_df.loc[idx]
+    ##################### 3. Cluster for each charge
+   cluster_df = pd.DataFrame()
+   for prec_charge_i in tqdm.tqdm(config.cluster_charges):
+       # Select spectra with cluster charge
+       idx = spectra_meta_df['precursor_charge']==prec_charge_i
+       spec_df_by_charge = spectra_meta_df.loc[idx]
 
- #       logger.info("Start clustering Charge {} with {} spectra".format(prec_charge_i, len(spec_df_by_charge)))
+       logger.info("Start clustering Charge {} with {} spectra".format(prec_charge_i, len(spec_df_by_charge)))
         
- #       cluster_labels_per_charge, cluster_representatives_per_charge = hd_cluster.cluster_spectra(
- #           spectra_by_charge_df=spec_df_by_charge, encoded_spectra_hv=spectra_hvs[idx],
- #           config=config, logger=logger)
+       cluster_labels_per_charge, cluster_representatives_per_charge = hd_cluster.cluster_spectra(
+           spectra_by_charge_df=spec_df_by_charge, encoded_spectra_hv=spectra_hvs[idx],
+           config=config, logger=logger)
 
- #       spec_df_by_charge = spec_df_by_charge.assign(
- #           cluster=list(cluster_labels_per_charge), 
- #           is_representative=list(cluster_representatives_per_charge))
+       spec_df_by_charge = spec_df_by_charge.assign(
+           cluster=list(cluster_labels_per_charge), 
+           is_representative=list(cluster_representatives_per_charge))
         
- #       cluster_df = pd.concat([cluster_df, spec_df_by_charge])
+       cluster_df = pd.concat([cluster_df, spec_df_by_charge])
 
 
- #   hd_preprocess.export_cluster_results(
-  #      spectra_df=cluster_df, config=config, logger=logger)
+   hd_preprocess.export_cluster_results(
+       spectra_df=cluster_df, config=config, logger=logger)
 
 
 if __name__ == "__main__":

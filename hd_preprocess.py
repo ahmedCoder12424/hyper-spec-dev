@@ -13,6 +13,7 @@ from config import Config
 from utils import load_mgf_file, export_mgf_file
 
 
+#class to load previous results, takes input of meta data, hypervectors, cluster_results
 class StaticClusterResults:
 
     def __init__(self, spectra_meta_df, spectra_hvs, cluster_results):
@@ -20,16 +21,17 @@ class StaticClusterResults:
         self.spectra_hvs = spectra_hvs
         self.cluster_results = cluster_results
 
+    #retrieves data for a specific bucket 
     def get_bucket_data(self,bucket):
        meta_subset = self.spectra_meta_df.loc[self.spectra_meta_df['bucket']==bucket]
        hvs_subset = self.spectra_hvs[meta_subset.index]
 
        valid_index = meta_subset.index.intersection(self.cluster_results.index)
        cluster_subset = self.cluster_results.loc[valid_index]
-      # cluster_subset = self.cluster_results.loc[meta_subset.index]
+       #cluster_subset = self.cluster_results.loc[meta_subset.index]
 
        return meta_subset, hvs_subset, cluster_subset
-
+    #retrieves data for a specific cluster 
     def get_cluster_data(self,cluster):
         cluster_subset = self.cluster_results.loc[self.cluster_results['cluster']==cluster]
         meta_subset = self.spectra_meta_df.loc[cluster_subset.index]
