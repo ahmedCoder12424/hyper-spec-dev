@@ -11,9 +11,97 @@ from joblib import Parallel, delayed
 
 from config import Config
 from utils import load_mgf_file, export_mgf_file
+import cupy as cp
+import os 
+from numba import jit
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-#class to load previous results, takes input of meta data, hypervectors, cluster_results
+#function to load datasets created by create_dataset
+def load_datasets(file, mode, logger):
+
+    ckp_parquet_file = file + '/' + file + '_meta_' + mode + '.ckp'
+    ckp_hvs_file = file + '/' + file + '_hvs_' + mode + '.ckp'
+    print(ckp_parquet_file, ckp_hvs_file)
+    spectra_meta_df = pd.read_parquet(ckp_parquet_file) \
+        if os.path.exists(ckp_parquet_file) else None
+
+    spectra_hvs = None
+    if os.path.exists(ckp_hvs_file):
+        with open(ckp_hvs_file, 'rb') as f:
+            spectra_hvs = np.load(f)
+
+    if (spectra_meta_df is not None) and (spectra_hvs is not None):
+        logger.info("Successfully restored checkpoints from {} and {}!".format(ckp_parquet_file, ckp_hvs_file))
+    else:
+        logger.info("Incomplete checkpoints!")
+
+    return spectra_meta_df, spectra_hvs
+
+#function to create datasets for test/train based on ratio
+def create_test_data(ratio, spectra_meta_df, spectra_hvs, file_name):
+    
+    shuffled_indices = np.random.permutation(len(spectra_hvs))
+    test_set_size = int(ratio*len(spectra_meta_df))
+    print("test_set_size", test_set_size)
+    train_indices = shuffled_indices[:test_set_size]
+    test_indices =  shuffled_indices[test_set_size:]
+
+    test_data_hvs, test_data_meta = spectra_hvs[test_indices], spectra_meta_df.iloc[test_indices]
+    train_data_hvs, train_data_meta = spectra_hvs[train_indices], spectra_meta_df.iloc[train_indices]
+
+    ckp_train_meta_file = file_name + '_meta_train' + '.ckp'
+    ckp_train_hvs_file = file_name + '_hvs_train' + '.ckp'
+    ckp_test_meta_file = file_name + '_meta_test' + '.ckp'
+    ckp_test_hvs_file = file_name + '_hvs_test' + '.ckp'
+
+    os.mkdir(file_name)
+    test_data_meta.to_parquet(file_name + "/" + ckp_test_meta_file, compression='snappy', index=False)
+    train_data_meta.to_parquet(file_name + "/" + ckp_train_meta_file, compression='snappy', index=False)
+    with open(file_name + "/" + ckp_train_hvs_file, 'wb') as f:
+        np.save(f, train_data_hvs)
+
+    with open(file_name + "/" + ckp_test_hvs_file, 'wb') as f:
+        np.save(f, test_data_hvs)
+
+    print("created dataset files",ckp_train_meta_file,  ckp_train_hvs_file, ckp_test_meta_file, ckp_test_hvs_file)
+
+#function to bundle an input hypervector array
+def bundle(input_hv):
+    input_hv = cp.asarray(input_hv.view(np.uint8))
+    N, byte_len = input_hv.shape
+    unpacked_hv = cp.unpackbits(input_hv.ravel())  
+    unpacked_hv = unpacked_hv.reshape(N, byte_len * 8)
+
+    column_sums = cp.sum(unpacked_hv, axis=0)
+    bundled_hv = (column_sums >= (N / 2)).astype(cp.uint8)
+
+    bundled_hv = cp.packbits(cp.asarray(bundled_hv))
+    return cp.asnumpy(bundled_hv)
+
+#uses bundle function to retrieve cluster results, can specify to limit to bucket
+#parallelized 
+def get_all_cluster_reps(previousResults, bucket=None):
+    clusters = previousResults.cluster_results.drop_duplicates(subset='cluster')["cluster"].to_numpy()
+    if (bucket is not None):
+        clusters = previousResults.cluster_results[previousResults.cluster_results['bucket'] == bucket].drop_duplicates(subset='cluster')["cluster"].to_numpy()
+    results = []
+    @jit
+    def worker(cluster):
+        meta_subset, hvs_subset, cluster_subset = previousResults.get_cluster_data(cluster)
+        rep_hv = bundle(hvs_subset)
+        return {"cluster": cluster, "rep_hv": rep_hv}
+
+    with ThreadPoolExecutor() as executor:
+        futures = {executor.submit(worker, cluster): cluster for cluster in clusters}
+        
+        for future in tqdm.tqdm(as_completed(futures), total=len(clusters), desc="Bundling clusters"):
+            results.append(future.result())
+
+    representatives = pd.DataFrame(results)
+    return representatives
+
+#class to store previous cluster results, meta_data, and hypervectors
 class StaticClusterResults:
 
     def __init__(self, spectra_meta_df, spectra_hvs, cluster_results):
@@ -21,17 +109,14 @@ class StaticClusterResults:
         self.spectra_hvs = spectra_hvs
         self.cluster_results = cluster_results
 
-    #retrieves data for a specific bucket 
     def get_bucket_data(self,bucket):
        meta_subset = self.spectra_meta_df.loc[self.spectra_meta_df['bucket']==bucket]
        hvs_subset = self.spectra_hvs[meta_subset.index]
-
        valid_index = meta_subset.index.intersection(self.cluster_results.index)
        cluster_subset = self.cluster_results.loc[valid_index]
-       #cluster_subset = self.cluster_results.loc[meta_subset.index]
 
        return meta_subset, hvs_subset, cluster_subset
-    #retrieves data for a specific cluster 
+
     def get_cluster_data(self,cluster):
         cluster_subset = self.cluster_results.loc[self.cluster_results['cluster']==cluster]
         meta_subset = self.spectra_meta_df.loc[cluster_subset.index]
@@ -101,9 +186,19 @@ def save_checkpoint(
  
     logger.info("Save spectra metadata to: {} and encoded spectra to: {}".format(ckp_parquet_file, ckp_hvs_file))
     
-    
+    csv_meta_file = config.checkpoint + '_meta.csv'
+    csv_hvs_file = config.checkpoint + '_hvs.csv'
+
+#   spectra_meta.to_csv(csv_meta_file, index=False)
+    # Convert numpy array to DataFrame for structured saving
+  #  pd.DataFrame(spectra_hvs).to_csv(csv_hvs_file, index=False, header=False)
+
+    logger.info("Saved spectra metadata to: {} (parquet), {} (csv)".format(ckp_parquet_file, csv_meta_file))
+    logger.info("Saved encoded spectra to: {} (binary), {} (csv)".format(ckp_hvs_file, csv_hvs_file))
+
 def export_cluster_results(
     spectra_df: pd.DataFrame,
+    cluster_reps: pd.DataFrame,
     config: Config,
     logger: logging
     ):
@@ -121,7 +216,10 @@ def export_cluster_results(
     spectra_df.to_parquet(cluster_parquet_filename, compression='snappy', index=False)
     logger.info("Exporting clustering labels to {}".format(cluster_parquet_filename))
     
-    
+    cluster_reps_parquet_filename = 'CLUSTER_REPRESENTATIVES.parquet'
+    cluster_reps.to_parquet(cluster_reps_parquet_filename, compression='snappy', index=False)
+    logger.info("Exporting clustering representatives to {}".format(cluster_reps_parquet_filename))
+
     if config.representative_mgf:
         representative_mgf_filename = config.output_filename + '_representatives.mgf'
         logger.info("Exporting cluster representatives to {}".format(representative_mgf_filename))
@@ -171,7 +269,36 @@ def load_clustering_result(
         logger.info("No cluster results found")
 
     return cluster_results     
-    
+
+def load_clustering_rep(
+    config: Config,
+    logger: logging
+    ):
+    """
+    Restore from previously saved checkpoint files (spectra meta and encoded hvs)
+    Parameters
+    ----------
+    config : 
+        Config that defines runtime parameters
+    Returns
+    -------
+    spectra_meta_df : 
+        Restored spectra meta dataframe
+    spectra_hvs : 
+        Restored spectra hvs array
+    """
+    cluster_rep_file = "CLUSTER_REPRESENTATIVES"+'.parquet'
+    cluster_reps = pd.read_parquet(cluster_rep_file) \
+        if os.path.exists(cluster_rep_file) else None
+
+
+    if (cluster_reps is not None):
+        logger.info("Successfully restored cluster representatives from {}!".format(cluster_rep_file))
+    else:
+        logger.info("No cluster representatives found")
+
+    return cluster_reps
+
 def sort_spectra_meta_data(
     spectra_meta_df: pd.DataFrame,
     spectra_mz: np.ndarray,
